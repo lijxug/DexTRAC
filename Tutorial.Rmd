@@ -1,0 +1,929 @@
+---
+title: "Tutorial for TRIDENT"
+---
+
+# Loading
+```{r}
+require(tidyverse)
+require(checkmate)
+require(ggrepel)
+require(ggtext)
+require(JasonToolBox)
+require(fitdistrplus)
+```
+
+```{r}
+meta_tbl = read_csv('../09.Niehu_HBVHCC/hbv_hcc_cohor2.rna_tcr_dex.csv')
+colnames(meta_tbl)[1] = 'cellID'
+clone2pat_vec = meta_tbl %>% dplyr::select(clone.id, patient) %>% distinct() %>% with(setNames(nm = clone.id, patient))
+
+HBVgp_names = str_extract(pattern = '^HBVgp.*', colnames(meta_tbl)) %>% .[!is.na(.)]
+
+gpexpr_mt = as.matrix(meta_tbl[, HBVgp_names])
+rownames(gpexpr_mt) = meta_tbl$cellID
+gpexpr_mt[is.na(gpexpr_mt)] = 0
+celltype_vec = with(meta_tbl, setNames(nm = cellID, major_cluster))
+major_celltype_vec = setNames(nm = names(celltype_vec), celltype_vec %>% str_extract(pattern = '^[^_]+'))
+checkmate::assert(all(meta_tbl$`CD4/CD8` == major_celltype_vec))
+
+cloneid_vec = with(meta_tbl, setNames(nm = cellID, meta_tbl$clone.id))
+clonesize_vec = meta_tbl %>% dplyr::select(clone.id, clone.size) %>% distinct() %>% deframe
+CD8clonesize_vec = meta_tbl %>% dplyr::filter(major_cluster == 'CD8') %>% pull(clone.id) %>% table
+
+```
+
+
+# Determine cutoff for each antibody
+```{r, fig.width=4, fig.height=2.5}
+ctrl_p_cutoff = 0.0005
+theme_set(theme_classic(base_size = 20))
+gpexpr_lst = list()
+for(i_atbd in colnames(gpexpr_mt)){
+  #i_atbd = colnames(gpexpr_mt)[1]
+  plt_df = data.frame(
+    cellID = rownames(gpexpr_mt), 
+    x = gpexpr_mt[, i_atbd], 
+    # group = ifelse(major_celltype_vec[rownames(gpexpr_mt)] == 'CD4', 'ctrl', 'test'))
+    group = major_celltype_vec[rownames(gpexpr_mt)])
+  
+  
+  y = plt_df %>% dplyr::filter(group == 'CD4') %>% pull(x)
+  fit_res = fitdistrplus::fitdist(data = y, distr = 'nbinom', method = 'mme', start = list(size = 0.05, mu = 0.05))
+  # plot(fit_res)
+  if(any(is.na(fit_res$estimate))){
+    t_cutoff = 0
+  } else {
+    t_cutoff = qnbinom(ctrl_p_cutoff, size = fit_res$estimate['size'], mu = fit_res$estimate['mu'], lower.tail = F)
+  }
+  
+  
+  p1 = plt_df %>% ggplot(aes(x = x, fill = group)) +
+    geom_bar(position = position_dodge2(preserve = 'single')) +
+    geom_vline(xintercept = t_cutoff + 0.5, linetype = 2) +
+    scale_y_log10() +
+    labs(title = sprintf('Target antigen = \n%s\ncutoff = %d', i_atbd, t_cutoff), x = "Number of antibody counts", y = "Number of cells", fill = 'Group') + 
+    theme(title = element_text(size = 15))
+  # p1 
+  
+  attached_lgl = gpexpr_mt[, i_atbd] > t_cutoff
+  
+  gpexpr_lst[[i_atbd]] = list(
+    fit_res = fit_res, 
+    cutoff = t_cutoff, 
+    plot = p1,
+    attached_lgl = attached_lgl, 
+    count_vec = gpexpr_mt[, i_atbd]
+  )
+  # print(p1)
+}
+names(gpexpr_lst) = colnames(gpexpr_mt)
+# lapply(gpexpr_lst, function(x){x$cutoff}) %>% unlist
+require(patchwork)
+plot(gpexpr_lst$HBVgp2_aagc_env$fit_res)
+tmp_plt = gpexpr_lst$HBVgp2_aagc_env$plot
+tmp_plt$layers[[2]] = NULL
+tmp_plt$labels$title = str_replace(pattern = '\n.*$', string = tmp_plt$labels$title, replacement = '')
+tmp_plt
+ggsave('./plots/barplot_nbinomrandom_example.pdf', plot = tmp_plt, width = 8, height = 5)
+# gpexpr_lst[[10]]$plot
+```
+
+## Show all cutoffs
+```{r, fig.width=15, fig.height=8}
+patchwork::wrap_plots(lapply(gpexpr_lst, function(x){x$plot}) , ncol = 8, guides = 'collect') + patchwork::plot_annotation(title = sprintf('P value control = %.4f', ctrl_p_cutoff))
+ggsave('./plots/barplot_nbinom_cutoffs.pdf', width = 30, height = 16)
+```
+
+```{r}
+bind_count_mt = lapply(gpexpr_lst, function(x){x$count_vec}) %>% do.call(what = cbind)
+bind_mt = lapply(gpexpr_lst, function(x){x$attached_lgl}) %>% do.call(what = cbind)
+bind_mt = bind_mt[(major_celltype_vec != 'CD4')[rownames(bind_mt)], ]
+flt_cloneid_vec = cloneid_vec[rownames(bind_mt)]
+clonal_cloneids = table(flt_cloneid_vec) %>% `>`(1) %>% .[.] %>% names
+
+n_all_cells = nrow(bind_mt)
+# pval_mt = matrix(NA, nrow = length(clonal_cloneids), ncol = ncol(bind_mt), dimnames = list(clonal_cloneids, colnames(bind_mt)))
+# pval_hyper_mt = pval_mt
+# OR_mt = matrix(NA, nrow = length(clonal_cloneids), ncol = ncol(bind_mt), dimnames = list(clonal_cloneids, colnames(bind_mt)))
+
+clone_atbd_lst = pbmcapply::pbmclapply(clonal_cloneids, mc.cores = 50, function(t_tcr_clone){
+  # t_tcr_clone = '14687'
+  clone_atbd_vec = colSums(bind_mt[names(flt_cloneid_vec)[flt_cloneid_vec == t_tcr_clone],])
+  # clone_atbd_lst[[t_tcr_clone]] = clone_atbd_vec
+  t_clone.size = sum(flt_cloneid_vec == t_tcr_clone)
+  t_res_lst = list()
+  for(t_antibody in colnames(bind_mt)){
+    # t_antibody = "HBVgp2_ct_env"
+    t_antibody_size = sum(bind_mt[, t_antibody])
+    test_mt = matrix(
+      c(
+        clone_atbd_vec[t_antibody],
+        t_clone.size - clone_atbd_vec[t_antibody],
+        t_antibody_size - clone_atbd_vec[t_antibody],
+        n_all_cells - t_clone.size - t_antibody_size + clone_atbd_vec[t_antibody]
+      ),
+      ncol = 2,
+      dimnames = list(c('Bind', 'NotBind'), c('Clone', 'NotClone'))
+    )
+    fisher_res = fisher.test(
+      test_mt, alternative = 'greater'
+    )
+    p_hyper = phyper(clone_atbd_vec[t_antibody]-1, m = t_antibody_size, n = n_all_cells - t_antibody_size, k = t_clone.size, lower.tail = F)
+    t_res_lst[[t_antibody]] = list(
+      test_mt = test_mt,
+      fisher_res = fisher_res,
+      p_hyper = p_hyper,
+      data_df = data.frame(CloneID = t_tcr_clone, Antibody = t_antibody, Fisher.Pval = fisher_res$p.value, Fisher.OR = fisher_res$estimate, Hyper.Pval = p_hyper)
+    )
+    # pval_mt[t_tcr_clone, t_antibody] = fisher_res$p.value
+    # OR_mt[t_tcr_clone, t_antibody] = fisher_res$estimate
+    # pval_hyper_mt[t_tcr_clone, t_antibody] = phyper(clone_atbd_vec[t_antibody]-1, m = sum(bind_mt[, t_antibody]), n = length(flt_cloneid_vec) - sum(bind_mt[, t_antibody]), k = sum(flt_cloneid_vec == t_tcr_clone), lower.tail = F)
+  }
+  return(t_res_lst)
+})
+names(clone_atbd_lst) = clonal_cloneids
+
+pval_df = bind_rows(pbmcapply::pbmclapply(clone_atbd_lst, mc.cores = 10, function(x) {
+  t_tbl = bind_rows(lapply(x, function(y) {
+    rownames(y$data_df) = NULL
+    return(y$data_df)
+  }))
+  return(t_tbl)
+}))
+pval_df = pval_df %>% mutate(Fisher.Padj = p.adjust(Fisher.Pval, method = 'BH'), 
+                             Hyper.Padj = p.adjust(Hyper.Pval, method = 'BH'))
+# 
+```
+
+## Show padj mt
+```{r, fig.width=12, fig.height=10}
+padj_cutoff = 0.1
+breaks_vec = c(seq(0, -log10(padj_cutoff), 0.05), seq(-log10(padj_cutoff), -log10(0.01), 0.05)) %>% unique()
+padj_mt = pval_df %>% reshape2::acast(CloneID ~ Antibody, value.var = 'Fisher.Padj')
+count_vec = apply(padj_mt, 1, function(x){sum(x<padj_cutoff)})
+table(count_vec)
+signif_clones = rownames(padj_mt)[apply(padj_mt, 1, function(x){sum(x<padj_cutoff) > 0})]
+signif_clones = names(clonesize_vec[signif_clones] %>% sort(decreasing = T))
+flt_padj_mt = padj_mt[signif_clones, ]
+sprintf('Number of non-specific clones: %d', nrow(padj_mt) - nrow(flt_padj_mt))
+
+
+pheatmap::pheatmap(
+  -log10(flt_padj_mt),
+  show_rownames = T,
+  cluster_cols = T,
+  cluster_rows = T,
+  color = colorRampPalette(rev(
+    RColorBrewer::brewer.pal(n = 7, name = "RdYlBu")
+  ))(length(breaks_vec)),
+  breaks = breaks_vec,
+  display_numbers = T,
+  filename = './plots/heatmap_HBVantigen_specificity.pdf', 
+  height = 10, width = 12,
+  main = 'Enrichment'
+)
+pheatmap::pheatmap(
+  -log10(flt_padj_mt),
+  show_rownames = T,
+  cluster_cols = T,
+  cluster_rows = T,
+  color = colorRampPalette(rev(
+    RColorBrewer::brewer.pal(n = 7, name = "RdYlBu")
+  ))(length(breaks_vec)),
+  breaks = breaks_vec,
+  display_numbers = T,
+  # filename = './plots/heatmap_HBVantigen_specificity.pdf',
+  # height = 10, width = 12,
+  main = 'Enrichment'
+)
+
+```
+
+
+```{r, fig.width=8, fig.height=6}
+breaks_vec = unique(c(seq(0, 1, 0.05), seq(1,2, 0.05)))
+OR_mt = pval_df %>% reshape2::acast(CloneID ~ Antibody, value.var = 'Fisher.OR')
+flt_OR_mt = OR_mt[signif_clones, ]
+flt_OR_mt[flt_OR_mt == Inf] = max(flt_OR_mt[flt_OR_mt != Inf])
+pheatmap::pheatmap(
+  flt_OR_mt,
+  show_rownames = T,
+  cluster_cols = F,
+  cluster_rows = F,
+  display_numbers = T,
+  color = colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name = "RdYlBu")))(length(breaks_vec)),
+  breaks = breaks_vec,
+)
+```
+
+
+# Pie chart for examination each clones
+```{r, fig.height=20, fig.width=20}
+enrichment_vec = apply(flt_padj_mt, 1, function(x){y = names(x)[x<padj_cutoff]; return(paste0(y, collapse = '\n'))})
+
+set.seed(1111)
+source('color_palette_89.R')
+color_atbds = setNames(
+  nm = c(colnames(bind_mt), 'Mult', 'None'), 
+  c(sample(color_palette_89, ncol(bind_mt)),"#E3E3E3", "#FFFFFF"))
+
+
+require(ggrepel)
+plt_lst = list()
+
+# Sort with clone size 
+signif_clonotypes2run = names(clonesize_vec[rownames(flt_padj_mt)] %>% sort(decreasing = T))
+for(t_tcr_clone in signif_clonotypes2run){
+atbd_count_vec = bind_count_mt[names(flt_cloneid_vec)[flt_cloneid_vec == t_tcr_clone], ] %>% 
+  apply(1, function(x) { 
+    x = x[x != 0] 
+    if (length(x) != 0) {
+      max_lbl = names(x)[which(x == max(x))]
+      if(length(max_lbl) > 1){
+        return('Mult')
+      }
+      return(max_lbl)
+    } else {
+      return('None')
+    }
+  }) %>% unlist() %>% table() 
+  t_clone.size = clonesize_vec[t_tcr_clone]
+  atbd_count_vec = atbd_count_vec[atbd_count_vec !=0]
+  atbd_count_vec = setNames(nm = names(atbd_count_vec), as.numeric(atbd_count_vec))
+  
+  t_plt_tbl = atbd_count_vec %>% enframe(name = 'antibody', value = 'count') %>% mutate(ratio = count/t_clone.size) %>% arrange(desc(ratio)) %>% 
+    mutate(csum = rev(cumsum(rev(ratio))), 
+           pos = ratio/2 + lead(csum, 1), 
+           pos = if_else(is.na(pos), ratio / 2, pos))
+  
+  checkmate::assert(sum(t_plt_tbl$count) == clonesize_vec[t_tcr_clone])
+  
+  p1 = ggplot(t_plt_tbl, aes(x = '', y = ratio, fill = fct_inorder(antibody))) + 
+    geom_col(width = 1, color = 1) +
+    coord_polar(theta = 'y') +
+    geom_label_repel(data = t_plt_tbl %>% head(5), aes(y = pos, label = antibody), nudge_x = 1)+ 
+    theme_void() + 
+    theme(legend.position = 'None') +
+    scale_fill_manual(values = color_atbds) +
+    labs(title = sprintf('CloneID: %s, size = %d\nAntigen enriched: \n%s', t_tcr_clone, clonesize_vec[t_tcr_clone], enrichment_vec[t_tcr_clone]))
+  
+  plt_lst[[t_tcr_clone]] = p1
+}
+patchwork::wrap_plots(plt_lst, ncol = 5)
+ggsave(filename = './plots/piebatch_antigen_specificities.pdf', height = 20, width = 20)
+
+```
+
+
+
+```{r, fig.width=6, fig.height=5}
+sprintf('%d/%d', sum(CD8clonesize_vec[signif_clones]), sum(CD8clonesize_vec[clonal_cloneids]))
+
+plt_clonal_tbl = tibble(
+  category = c('HBV-specific', 'Unknown'),
+  ratio = c(
+    sum(CD8clonesize_vec[signif_clones]) / sum(CD8clonesize_vec[clonal_cloneids]),
+    1 - sum(CD8clonesize_vec[signif_clones]) / sum(CD8clonesize_vec[clonal_cloneids])
+  )
+) %>% arrange(desc(ratio)) %>%
+  mutate(
+    csum = rev(cumsum(rev(ratio))),
+    pos = ratio / 2 + lead(csum, 1),
+    pos = if_else(is.na(pos), ratio / 2, pos)
+  )
+
+
+  
+ggplot(plt_clonal_tbl, aes(
+  x = '', y = ratio, fill = fct_inorder(category) )) +
+  geom_col(width = 1, color = 1) +
+  coord_polar(theta = 'y') +
+  geom_label_repel(data = plt_clonal_tbl,
+                   aes(y = pos, label = sprintf('%s: %.2f%%', category, ratio * 100)),
+                   nudge_x = 1) +
+  theme_void() +
+  labs(title = sprintf('Percentage of HBV-specific T cells in all clonal CD8 T cells\n(n  = %d)', sum(CD8clonesize_vec[clonal_cloneids]))) +
+  theme(legend.position = 'None')
+ggsave(filename = './plots/pie_percentage_HBV-specific_Tcells.pdf', height = 5, width = 6)
+# data.frame(category = c(),
+#            sum(CD8clonesize_vec[signif_clones])/sum(CD8clonesize_vec[clonal_cloneids])
+
+```
+
+```{r, fig.width=3, fig.height=2.5}
+plt_OR_df = pval_df
+plt_OR_df$Fisher.OR[plt_OR_df$Fisher.OR == Inf] = max(plt_OR_df$Fisher.OR[plt_OR_df$Fisher.OR != Inf])
+
+x = plt_OR_df %>% 
+  filter(CloneID %in% signif_clones) %>% 
+  filter(Fisher.OR > 1) %>% pull(Fisher.OR) %>% log10
+GMMfit_obj = mixtools::normalmixEM(x = x, k = 2)
+
+p_norm_cutoff = 0.005
+which_low = which(GMMfit_obj$mu == min(GMMfit_obj$mu))
+logOR_cutoff = qnorm(p_norm_cutoff, mean = GMMfit_obj$mu[which_low], sd = GMMfit_obj$sigma[which_low], lower.tail = F)
+
+plot(GMMfit_obj)
+
+plot(GMMfit_obj, which = 2, xlab2 = 'log10(Odd Ratios)')
+lines(density(x), lty = 2, lwd = 2)
+abline(v = logOR_cutoff, lty = 3, lwd = 2)
+
+pdf(file = sprintf('./plots/barplot_ORfitness.pdf'), width = 6, height = 5)
+plot(GMMfit_obj, which = 2, xlab2 = 'log10(Odd Ratios)')
+lines(density(x), lty = 2, lwd = 2)
+abline(v = logOR_cutoff, lty = 3, lwd = 2)
+dev.off()
+
+
+plt_OR_df = plt_OR_df %>% mutate(affinity = ifelse(Fisher.OR > 10^logOR_cutoff, 'High', 'Low'))
+plt_OR_df$affinity[plt_OR_df$Fisher.OR == 0] = 'None'
+plt_OR_df$affinity[plt_OR_df$Fisher.Padj >= padj_cutoff] = 'NotSignif'
+
+plt_OR_df %>%
+  filter(CloneID %in% signif_clones) %>%
+  # filter(Fisher.Padj < padj_cutoff) %>%
+  ggplot(aes(x = log10(Fisher.OR + 0.1))) +
+  geom_histogram(aes(y = ..count.., fill = affinity), bins = 30) +
+  geom_vline(xintercept = logOR_cutoff, linetype = 2) +
+  labs(fill = 'Affinity') +
+  theme_classic(base_size = 20)
+
+ggsave(filename = './plots/barplot_ORcategory.pdf', height = 4, width = 6)
+```
+
+```{r}
+highAff_lst = lapply(signif_clones, function(t_tcr_clone){
+  y = plt_OR_df %>% filter(CloneID == t_tcr_clone) %>% dplyr::select(Antibody, affinity) %>% deframe 
+  y[y!='NotSignif']
+})
+names(highAff_lst) = signif_clones
+```
+
+# Pie chart with affinity 
+```{r, fig.height=5, fig.width=11}
+plt_lst = list()
+for(t_tcr_clone in signif_clonotypes2run) {
+  atbd_count_vec = bind_count_mt[names(flt_cloneid_vec)[flt_cloneid_vec == t_tcr_clone],] %>%
+    apply(1, function(x) {
+      x = x[x != 0]
+      if (length(x) != 0) {
+        max_lbl = names(x)[which(x == max(x))]
+        if (length(max_lbl) > 1) {
+          return('Mult')
+        }
+        return(max_lbl)
+      } else {
+        return('None')
+      }
+    }) %>% unlist() %>% table()
+  t_clone.size = clonesize_vec[t_tcr_clone]
+  atbd_count_vec = atbd_count_vec[atbd_count_vec != 0]
+  atbd_count_vec = setNames(nm = names(atbd_count_vec), as.numeric(atbd_count_vec))
+  
+  t_plt_tbl = atbd_count_vec %>% 
+    enframe(name = 'antibody', value = 'count') %>% mutate(ratio = count / t_clone.size) %>% 
+    arrange(desc(ratio)) %>%
+    mutate(
+      csum = rev(cumsum(rev(ratio))),
+      pos = ratio / 2 + lead(csum, 1),
+      pos = if_else(is.na(pos), ratio / 2, pos)
+    )
+  
+  checkmate::assert(sum(t_plt_tbl$count) == clonesize_vec[t_tcr_clone])
+  
+  highAff_vec = highAff_lst[[t_tcr_clone]]
+  p1 = ggplot(t_plt_tbl, aes(
+    x = '',
+    y = ratio,
+    fill = fct_inorder(antibody)
+  )) +
+    geom_col(width = 1, color = 1) +
+    coord_polar(theta = 'y') +
+    geom_label_repel(data = t_plt_tbl %>% head(5),
+                     aes(y = pos, label = antibody),
+                     nudge_x = 1) +
+    theme_void() +
+    scale_fill_manual(values = color_atbds) +
+    labs(
+      title = sprintf('CloneID: %s, size = %d',
+                      t_tcr_clone,
+                      clonesize_vec[t_tcr_clone]),
+      caption = sprintf(
+        "Antigen affinity: <br><span style='color:red'>%s</span><br>%s",
+        paste0(names(highAff_vec)[highAff_vec == 'High'], collapse = '<br>'),
+        paste0(names(highAff_vec)[highAff_vec != 'High'], collapse = '<br>')
+      )
+    ) +
+    theme(
+      legend.position = 'None',
+      plot.title = element_text(hjust = 0.5),
+      plot.caption = ggtext::element_markdown(hjust = 0.5, size = 14)
+    )
+  p1
+  
+  plt_lst[[t_tcr_clone]] = p1
+}
+patchwork::wrap_plots(plt_lst, ncol = 9)
+ggsave(filename = './plots/piebatch_antigen_affinities.pdf', height = 10, width = 22)
+
+```
+
+# Pie chart of top clonal clones
+```{r, fig.height=9, fig.width=11}
+chosen_clones = meta_tbl %>% dplyr::select(patient, clone.id, clone.size) %>% distinct() %>% group_by(patient) %>% arrange(desc(clone.size)) %>% top_n(6, clone.size) %>% arrange(patient) %>% pull(clone.id) %>% as.character()
+plt_lst = list()
+for(t_tcr_clone in chosen_clones) {
+  atbd_count_vec = bind_count_mt[names(cloneid_vec)[cloneid_vec == t_tcr_clone],] %>%
+    apply(1, function(x) {
+      x = x[x != 0]
+      if (length(x) != 0) {
+        max_lbl = names(x)[which(x == max(x))]
+        if (length(max_lbl) > 1) {
+          return('Mult')
+        }
+        return(max_lbl)
+      } else {
+        return('None')
+      }
+    }) %>% unlist() %>% table()
+  t_clone.size = clonesize_vec[t_tcr_clone]
+  atbd_count_vec = atbd_count_vec[atbd_count_vec != 0]
+  atbd_count_vec = setNames(nm = names(atbd_count_vec), as.numeric(atbd_count_vec))
+  
+  t_plt_tbl = atbd_count_vec %>% enframe(name = 'antibody', value = 'count') %>% mutate(ratio = count /
+                                                                                          t_clone.size) %>% arrange(desc(ratio)) %>%
+    mutate(
+      csum = rev(cumsum(rev(ratio))),
+      pos = ratio / 2 + lead(csum, 1),
+      pos = if_else(is.na(pos), ratio / 2, pos)
+    )
+  
+  checkmate::assert(sum(t_plt_tbl$count) == clonesize_vec[t_tcr_clone])
+  
+  highAff_vec = highAff_lst[[t_tcr_clone]]
+  p1 = ggplot(t_plt_tbl, aes(
+    x = '',
+    y = ratio,
+    fill = fct_inorder(antibody)
+  )) +
+    geom_col(width = 1, color = 1) +
+    coord_polar(theta = 'y') +
+    geom_label_repel(data = t_plt_tbl %>% head(5),
+                     aes(y = pos, label = antibody),
+                     nudge_x = 1) +
+    theme_void() +
+    scale_fill_manual(values = color_atbds) +
+    labs(
+      title = sprintf('CloneID: %s, size = %d',
+                      t_tcr_clone,
+                      clonesize_vec[t_tcr_clone]),
+      caption = sprintf(
+        "Antigen affinity: <br><span style='color:red'>%s</span><br>%s",
+        paste0(names(highAff_vec)[highAff_vec == 'High'], collapse = '<br>'),
+        paste0(names(highAff_vec)[highAff_vec != 'High'], collapse = '<br>')
+      )
+    ) +
+    theme(
+      legend.position = 'None',
+      plot.title = element_text(hjust = 0.5),
+      plot.caption = ggtext::element_markdown(hjust = 0.5, size = 14)
+    )
+  p1
+  
+  plt_lst[[t_tcr_clone]] = p1
+}
+patchwork::wrap_plots(plt_lst, ncol = 6)
+ggsave(filename = './plots/piebatch_topclonalClones.pdf', height = 18, width = 22)
+
+```
+
+## manual examination
+```{r, fig.height=3, fig.width=3}
+# t_tcr_clone = 'clonotype_3'
+t_tcr_clone = 'clonotype_13'
+t_signif_atbds = padj_mt[t_tcr_clone,] %>% .[. < padj_cutoff] %>% names
+t_signif_atbds
+# t_antibody = 'HBVgp2_gcgg_pol'
+clone_cells = names(flt_cloneid_vec)[flt_cloneid_vec == t_tcr_clone]
+
+
+atbd_count_vec = bind_count_mt[names(flt_cloneid_vec)[flt_cloneid_vec == t_tcr_clone],] %>%
+  apply(1, function(x) {
+    x = x[x != 0]
+    if (length(x) != 0) {
+      max_lbl = names(x)[which(x == max(x))]
+      if (length(max_lbl) > 1) {
+        return('Mult')
+      }
+      return(max_lbl)
+    } else {
+      return('None')
+    }
+  }) %>% unlist() %>% table()
+# t_clone.size = clonesize_vec[t_tcr_clone]
+# clone_atbd_vec['None'] = t_clone.size - sum(clone_atbd_vec)
+atbd_count_vec = atbd_count_vec[atbd_count_vec != 0]
+atbd_count_vec = setNames(nm = names(atbd_count_vec), as.numeric(atbd_count_vec))
+
+t_plt_tbl = atbd_count_vec %>% enframe(name = 'antibody', value = 'count') %>% mutate(ratio = count /
+                                                                                        t_clone.size) %>% arrange(desc(ratio)) %>%
+  mutate(
+    csum = rev(cumsum(rev(ratio))),
+    pos = ratio / 2 + lead(csum, 1),
+    pos = if_else(is.na(pos), ratio / 2, pos)
+  )
+
+checkmate::assert(sum(t_plt_tbl$count) == clonesize_vec[t_tcr_clone])
+
+highAff_vec = highAff_lst[[t_tcr_clone]]
+
+ggplot(t_plt_tbl, aes(
+  x = '',
+  y = ratio,
+  fill = fct_inorder(antibody)
+)) +
+  geom_col(width = 1, color = 1) +
+  coord_polar(theta = 'y') +
+  geom_label_repel(data = t_plt_tbl %>% head(5),
+                   aes(y = pos, label = antibody),
+                   nudge_x = 1) +
+  theme_void() +
+  scale_fill_manual(values = color_atbds) +
+  labs(
+    title = sprintf('CloneID: %s, size = %d',
+                    # clone2pat_vec[t_tcr_clone],
+                    t_tcr_clone,
+                    clonesize_vec[t_tcr_clone]),
+    caption = sprintf(
+      "Antigen affinity: <br><span style='color:red'>%s</span><br>%s",
+      paste0(names(highAff_vec)[highAff_vec == 'High'], collapse = '<br>'),
+      paste0(names(highAff_vec)[highAff_vec != 'High'], collapse = '<br>')
+    )
+  ) +
+  theme(
+    legend.position = 'None',
+    plot.title = element_text(hjust = 0.5),
+    plot.caption = ggtext::element_markdown(hjust = 0.5, size = 14)
+  )
+
+ggsave(filename = sprintf('./plots/pie_clone_%s_inPat_%s.pdf', t_tcr_clone, clone2pat_vec[t_tcr_clone]), width = 6, height = 6)
+
+
+cat("======== atbd cell counts =======\n")
+colSums(bind_mt[clone_cells,]) %>% sort(decreasing = T) 
+cat("======== Rank: atbd cell counts =======\n")
+rank(-1 * colSums(bind_mt[clone_cells,]))[t_signif_atbds] %>% sort
+cat("======== atbd counts =======\n")
+colSums(bind_count_mt[clone_cells,]) %>% sort(decreasing = T) 
+cat("======== Rank: atbd counts =======\n")
+rank(-1 * colSums(bind_count_mt[clone_cells,]))[t_signif_atbds] %>% sort
+
+# clone_atbd_lst[[t_tcr_clone]][['HBVgp3_gg_x']]$test_mt
+```
+
+
+# Saving labels
+```{r}
+meta_out_tbl = meta_tbl %>% 
+  filter(major_cluster == 'CD8', clone.id %in% clonal_cloneids)
+
+HBV_specifc_clones = rownames(flt_padj_mt)
+Mono_reactive_clones = 
+  unique(c(unlist(lapply(highAff_lst, function(x){sum(x == 'High') == 1})) %>% .[.] %>% names, 
+    unlist(lapply(highAff_lst, function(x){length(x) == 1})) %>% .[.] %>% names))
+
+High_affinity_clones = unlist(lapply(highAff_lst, function(x){sum(x == 'High') > 0})) %>% .[.] %>% names
+
+meta_out_tbl = meta_out_tbl %>% mutate(
+  HBV_specifc_Tcell = ifelse(clone.id %in% HBV_specifc_clones, 'HBVspecific', 'Unknown'), 
+  Mono_recative = (clone.id %in% Mono_reactive_clones) & (clone.id %in% HBV_specifc_clones), 
+  Cross_reactive = (!(clone.id %in% Mono_reactive_clones)) & (clone.id %in% HBV_specifc_clones), 
+  High_affinity = ((clone.id %in% High_affinity_clones)) & (clone.id %in% HBV_specifc_clones), 
+  Low_affinity = (!(clone.id %in% High_affinity_clones)) & (clone.id %in% HBV_specifc_clones)
+)
+
+save(meta_out_tbl, clone_atbd_lst, highAff_lst, file = './out.RData')
+# write_tsv(meta_out_tbl, )
+
+# ggsave(filename = sprintf('./plots/pie_clone_%s_inPat_%s.pdf', t_tcr_clone, clone2pat_vec[t_tcr_clone]), width = 6, height = 6)
+```
+
+## Printing for overal distribution
+```{r, fig.width=3.5, fig.height=2.5}
+
+# Distribution across different patients
+meta_out_tbl %>% ggplot(aes(fill = HBV_specifc_Tcell, x = patient)) +
+  geom_bar(width = 0.5) + 
+  theme_classic(base_size = 20) +
+  labs(x = 'Patient', y = 'Cell count', fill = 'Category') +
+  scale_fill_discrete(labels = c('HBVspecific' = 'High-confidence HBV specific TCR', 'Unknown' = 'None-enriched TCR')) + 
+  theme(legend.position = 'bottom') +
+  guides(fill = guide_legend( ncol = 1))
+
+ggsave(filename = './plots/barplot_specific.pdf', width = 7, height = 5)
+
+P16_clonesize = meta_out_tbl %>% filter(patient == 'P16') %>% select(clone.id, clone.size) %>% distinct() %>% deframe %>% sort(decreasing = T)
+head(P16_clonesize, 10)
+
+P16_cloneids = meta_out_tbl %>% filter(patient == 'P16') %>% pull(clone.id) %>% unique()
+
+```
+
+```{r, fig.width=3, fig.height=2.5}
+
+atbd_count_lst = pbmcapply::pbmclapply(mc.cores = 20, X = clonal_cloneids, FUN = function(t_tcr_clone ){
+atbd_count_vec = bind_count_mt[names(cloneid_vec)[cloneid_vec == t_tcr_clone], ] %>% 
+  apply(1, function(x) { 
+    x = x[x != 0] 
+    if (length(x) != 0) {
+      max_lbl = names(x)[which(x == max(x))]
+      if(length(max_lbl) > 1){
+        return('Mult')
+      }
+      return(max_lbl)
+    } else {
+      return('None')
+    }
+  }) %>% unlist() %>% table() 
+  atbd_count_vec = atbd_count_vec[atbd_count_vec !=0]
+  atbd_count_vec = setNames(nm = names(atbd_count_vec), as.numeric(atbd_count_vec))
+  
+  return(atbd_count_vec['None']/sum(atbd_count_vec))
+})
+names(atbd_count_lst) = clonal_cloneids
+
+plt_bindratio_tbl = tibble(clone_id = clonal_cloneids, NoneBind_Ratio = atbd_count_lst %>% unlist()) %>% 
+  mutate(tag = ifelse(clone_id %in% HBV_specifc_clones, 'HBVspecific', ifelse(clone_id %in% P16_cloneids, 'P3clones', 'P16clones')))
+
+plt_bindratio_tbl$tag = factor(plt_bindratio_tbl$tag, levels = c('HBVspecific', 'P3clones', 'P16clones'))
+plt_bindratio_tbl$NoneBind_Ratio[is.na(plt_bindratio_tbl$NoneBind_Ratio)] = 0
+
+
+require(ggsignif)
+plt_bindratio_tbl %>% 
+  ggplot(aes(x = tag, y = 1-NoneBind_Ratio)) + 
+  geom_boxplot(width = 0.6) +
+  geom_signif(comparisons = list(
+    c('HBVspecific', 'P3clones'), 
+    c('HBVspecific', 'P16clones'),
+    c('P3clones', 'P16clones')
+  ), y_position = c(1, 1.1, 1.2),
+  map_signif_level = function(p) sprintf("p = %.2g", p)) +
+  theme_classic(base_size = 20) +
+  labs(x = '', y = 'Antibody binding ratio', title = 'All clonal clones')
+
+ggsave(filename = './plots/boxplot_bindingRatioCompare.pdf', width = 6, height = 5)
+
+n_clonesize_cutoff = 20
+chosen_clones = names(clonesize_vec)[clonesize_vec > n_clonesize_cutoff]
+require(ggsignif)
+plt_bindratio_tbl %>% 
+  filter(clone_id %in% chosen_clones) %>% 
+  ggplot(aes(x = tag, y = 1-NoneBind_Ratio)) + 
+  geom_boxplot() +
+  geom_signif(comparisons = list(
+    c('HBVspecific', 'P3clones'), 
+    c('HBVspecific', 'P16clones'),
+    c('P3clones', 'P16clones')
+  ), y_position = c(1, 1.1, 1.2),
+  map_signif_level = function(p) sprintf("p = %.2g", p)) +
+  theme_classic(base_size = 20) +
+  labs(x = '', y = 'Antibody binding ratio', title = sprintf('Clonal clones with at least %d cells', n_clonesize_cutoff))
+
+ggsave(filename = './plots/boxplot_bindingRatioCompare_fltClones.pdf', width = 6, height = 5)
+
+```
+
+# Combination of vj genes of TCRb
+```{r, fig.height=2, fig.width=3}
+meta_CD8_tbl = meta_tbl %>% dplyr::filter(major_cluster == 'CD8')
+theme_set(theme_classic(base_size = 20))
+# all ----
+with(meta_CD8_tbl, paste0(v_gene.B, "|", j_gene.B)) %>% table() %>% 
+  enframe() %>% 
+  arrange(desc(value)) %>% head(20) %>% 
+  ggplot(aes(x = reorder(name, -value), y = value )) +
+  geom_col() +
+  labs(x = "TCRβ v gene + j gene", y = 'Number of cells', title = 'All cells') + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+meta_CD8_tbl %>% dplyr::filter(clone.id %in% signif_clonotypes2run) %>% 
+  with(., paste0(v_gene.B, "|", j_gene.B)) %>% table() %>% 
+  enframe() %>% 
+  arrange(desc(value)) %>% head(20) %>% 
+  ggplot(aes(x = reorder(name, -value), y = value )) +
+  geom_col() +
+  labs(x = "TCRβ v gene + j gene", y = 'Number of cells', title = 'HBV-specific TCRs') + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+
+meta_CD8_tbl %>% dplyr::select(clone.id, v_gene.B, j_gene.B) %>% 
+  distinct() %>% 
+  with(., paste0(v_gene.B, "|", j_gene.B)) %>% table() %>% 
+  enframe() %>% 
+  arrange(desc(value)) %>% head(20) %>% 
+  ggplot(aes(x = reorder(name, -value), y = value )) +
+  geom_col() +
+  labs(x = "TCRβ v gene + j gene", y = 'Number of clonotype', title = 'All TCRs') + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+meta_CD8_tbl %>% dplyr::filter(clone.id %in% signif_clonotypes2run) %>% 
+  dplyr::select(clone.id, v_gene.B, j_gene.B) %>% 
+  distinct() %>% 
+  with(., paste0(v_gene.B, "|", j_gene.B)) %>% table() %>% 
+  enframe() %>% 
+  arrange(desc(value)) %>% head(20) %>% 
+  ggplot(aes(x = reorder(name, -value), y = value )) +
+  geom_col() +
+  labs(x = "TCRβ v gene + j gene", y = 'Number of clonotypes', title = 'HBV-specific TCRs') + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+meta_CD8_tbl %>% dplyr::filter(clone.id %in% signif_clonotypes2run) %>% 
+  dplyr::select(clone.id, v_gene.B, j_gene.B) %>% 
+  distinct() %>% 
+  pull(v_gene.B) %>% table() %>% 
+  enframe() %>% 
+  arrange(desc(value)) %>% head(20) %>% 
+  ggplot(aes(x = reorder(name, -value), y = value )) +
+  geom_col() +
+  labs(x = "TCRβ v gene + j gene", y = 'Number of clonotypes', title = 'HBV-specific TCRs') + 
+  theme(axis.text.x = element_text(angle = 60, hjust = 1))
+
+# test for each BV genes founded ----
+meta_CD8_tcrb_tbl = meta_CD8_tbl %>% dplyr::select(clone.id, v_gene.B) %>% distinct()
+meta_tcrb_tbl = meta_tbl %>% dplyr::select(clone.id, v_gene.B) %>% distinct()
+
+test_tbl = tibble()
+for(i_BV in unique(meta_CD8_tbl$v_gene.B)) {
+  n_both = meta_tcrb_tbl %>% dplyr::filter(clone.id %in% signif_clonotypes2run, v_gene.B == i_BV) %>% pull(clone.id) %>% unique() %>% length()
+  n_BV = meta_tcrb_tbl %>% dplyr::filter(!clone.id %in% signif_clonotypes2run, v_gene.B == i_BV) %>% pull(clone.id) %>% unique() %>% length()
+  n_HBV = meta_tcrb_tbl %>% dplyr::filter(clone.id %in% signif_clonotypes2run, v_gene.B != i_BV) %>% pull(clone.id) %>% unique() %>% length()
+  n_none = meta_tcrb_tbl %>% dplyr::filter(!clone.id %in% signif_clonotypes2run, v_gene.B != i_BV) %>% pull(clone.id) %>% unique() %>% length()
+  
+  fish_res = fisher.test(
+    matrix(c(n_both, n_BV, n_HBV, n_none), ncol = 2, dimnames = list(c('BV', 'notBV'), c('HBV', 'NotHBV'))), alternative = 'greater'
+  )
+  test_tbl = bind_rows(test_tbl, 
+                       tibble(BV = i_BV, p.val = fish_res$p.value, OR = fish_res$estimate))
+}
+test_tbl = test_tbl %>% mutate(adj.p.val = p.adjust(p.val, 'BH'))
+
+```
+
+# Identify HBV-related motifs for each atbd
+```{r}
+# Determine antigen-specifc TCRs
+atbd2clones_lst = lapply(colnames(flt_padj_mt), function(x) {
+  clone.ids = rownames(flt_padj_mt)[flt_padj_mt[, x] < padj_cutoff]
+  id2cdr3_lst = lapply(clone.ids, function(y) {
+    t_tbl = meta_tbl[meta_tbl$clone.id == y,]
+    list(
+      cdr3.A = unique(t_tbl$cdr3.A),
+      cdr3_nt.A = unique(t_tbl$cdr3_nt.A),
+      cdr3.B = unique(t_tbl$cdr3.B),
+      cdr3_nt.B = unique(t_tbl$cdr3_nt.B)
+    )
+  })
+  names(id2cdr3_lst) = clone.ids
+  return(id2cdr3_lst)
+})
+names(atbd2clones_lst) = colnames(flt_padj_mt)
+
+# Motif discovery
+# require(memes)
+# memes::check_meme_install()
+# memes::
+CMD_path = '/data/jason/tools/meme/bin/xstreme'
+output_dir = '/data/jason/projects/09.Niehu_HBVHCC/XSTREME/'
+
+# tmp_xss = Biostrings::DNAStringSet(x = atbd2clones_lst$HBVgp1_aa_pol$clonotype_7$cdr3_nt.A)
+
+write_fa = function(x, path){
+  h = file(path, open = 'w')
+  for(i in 1:length(x)){
+    write(paste0(">", names(x)[i]), file = h)
+    write(x[i], file = h)
+  }
+  close(h)
+}
+
+
+# background_seqs = setNames(
+#   nm = c(paste0(tcr_uniq_tbl$clone.id, '-cdr3_nt.A'), paste0(tcr_uniq_tbl$clone.id, '-cdr3_nt.B')),
+#   c(tcr_uniq_tbl$cdr3_nt.A, tcr_uniq_tbl$cdr3_nt.B))
+# write_fa(background_seqs, path = paste0(output_dir, 'cdr3_nt.background.fa'))
+
+
+
+# target_atbd = 'HBVgp2_gcac_env'
+for(target_atbd in names(atbd2clones_lst)) {
+  target_seqs = lapply(names(atbd2clones_lst[[target_atbd]]), function(x) {
+    y = atbd2clones_lst[[target_atbd]][[x]]
+    return(setNames(nm = c(paste0(
+      target_atbd, '-', x, '-', c('cdr3_aa.A', 'cdr3_aa.B')
+    )),
+    c(y$cdr3.A, y$cdr3.B)))
+  }) %>% unlist()
+  if(length(target_seqs) == 0){
+    warning('None found. Skip ', target_atbd)
+    next
+  }
+  test_fa_path = sprintf('%s/test_%s.fa', output_dir, target_atbd)
+  write_fa(target_seqs, path = test_fa_path)
+  
+  tcr_uniq_tbl = meta_tbl %>%
+    dplyr::filter(major_cluster == 'CD8') %>%
+    dplyr::select(clone.id, cdr3.A, cdr3.B) %>%
+    distinct() %>%
+    dplyr::filter(!clone.id %in% names(atbd2clones_lst[[target_atbd]]))
+  
+  background_seqs = setNames(nm = c(
+    paste0(tcr_uniq_tbl$clone.id, '-cdr3_aa.A'),
+    paste0(tcr_uniq_tbl$clone.id, '-cdr3_aa.B')
+  ),
+  c(tcr_uniq_tbl$cdr3.A, tcr_uniq_tbl$cdr3.B))
+  
+  test_bg_path = sprintf('%s/bg_%s.fa', output_dir, target_atbd)
+  write_fa(background_seqs, path = test_bg_path)
+  
+  out_dir = sprintf('%s/%s_out', output_dir, target_atbd)
+  out_msg = system2(command = CMD_path, args = c(
+    "--p", test_fa_path, "--oc", out_dir, "--n", test_bg_path, "--protein", "--streme-nmotifs", "10", "--maxw", "30", "--seed", "1111", "--evt", "0.01", "--fimo-skip"))
+}
+
+```
+
+# Identify HBV-related motifs for all atbd
+```{r}
+# Determine antigen-specifc TCRs
+# Motif discovery
+
+# target_atbd = 'HBVgp2_gcac_env'
+all_target_seqs = c()
+for(target_atbd in names(atbd2clones_lst)) {
+  target_seqs = lapply(names(atbd2clones_lst[[target_atbd]]), function(x) {
+    y = atbd2clones_lst[[target_atbd]][[x]]
+    return(setNames(nm = c(paste0(
+      target_atbd, '-', x, '-', c('cdr3_aa.A', 'cdr3_aa.B')
+    )),
+    c(y$cdr3.A, y$cdr3.B)))
+  }) %>% unlist()
+  all_target_seqs = c(all_target_seqs, target_seqs)
+}
+target_atbd = 'all'
+test_fa_path = sprintf('%s/test_%s.fa', output_dir, target_atbd)
+write_fa(all_target_seqs, path = test_fa_path)
+  
+tcr_uniq_tbl = meta_tbl %>%
+  dplyr::filter(major_cluster == 'CD8') %>%
+  dplyr::select(clone.id, cdr3.A, cdr3.B) %>%
+  distinct() %>%
+  dplyr::filter(!clone.id %in% signif_clonotypes2run)
+  
+background_seqs = setNames(nm = c(
+  paste0(tcr_uniq_tbl$clone.id, '-cdr3_aa.A'),
+  paste0(tcr_uniq_tbl$clone.id, '-cdr3_aa.B')
+),
+c(tcr_uniq_tbl$cdr3.A, tcr_uniq_tbl$cdr3.B))
+  
+test_bg_path = sprintf('%s/bg_%s.fa', output_dir, target_atbd)
+write_fa(background_seqs, path = test_bg_path)
+  
+out_dir = sprintf('%s/%s_out', output_dir, target_atbd)
+out_msg = system2(
+  command = CMD_path,
+  args = c( "--p", test_fa_path, "--oc", out_dir, "--n", test_bg_path,
+    "--protein", "--streme-nmotifs", "10", "--maxw", "30", "--seed",
+    "1111", "--evt", "0.01", "--fimo-skip"))
+
+```
+
+## Collect and combine xstreme results
+```{r}
+# All atbd ----
+all_atbd_motifs = read_tsv('XSTREME/all_out/xstreme.tsv')
+all_atbd_motifs = all_atbd_motifs[!all_atbd_motifs$RANK %>% grepl(pattern = '^#'), ]
+
+# Each atbd ----
+each_atbd_motifs = tibble()
+files2read = Sys.glob('./XSTREME/*_out') %>% grep(pattern = 'all_out', invert = T, value = T) %>% paste0(., '/xstreme.tsv')
+for(i_file in files2read){
+  tmp_tbl = read_tsv(i_file)
+  tmp_tbl = tmp_tbl[!tmp_tbl$RANK %>% grepl(pattern = '^#'), ] %>% mutate(target_atbd = i_file %>% str_extract(pattern = '(?<=/)[^/]*(?=_out)')) 
+  
+  if(nrow(tmp_tbl) >0) {
+    each_atbd_motifs = bind_rows(each_atbd_motifs, tmp_tbl)
+  }
+}
+
+each_atbd_motifs %>% view()
+```
+
+
+# Storage
+```{r}
+# save.image('./tmp.RData')
+# load('./tmp.RData')
+```
+
