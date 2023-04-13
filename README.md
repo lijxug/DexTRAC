@@ -1,2 +1,2 @@
-# TRIDENT
-TCR Identification and Evaluation for Determining Effective Targets
+# DexTRAC
+Dextramer-based T-cell Receptor Analysis and Characterization tool
