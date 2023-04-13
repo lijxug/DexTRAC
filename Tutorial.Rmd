@@ -1,5 +1,5 @@
 ---
-title: "Tutorial for TRIDENT"
+title: "Tutorial for DexTRAC"
 ---
 
 # Loading
