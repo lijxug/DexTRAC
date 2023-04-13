@@ -1,5 +1,5 @@
-Package: TRIDENT
-Title: TCR Identification and Evaluation for Determining Effective Targets
+Package: DexTRAC
+Title: Dextramer-based T-cell Receptor Analysis and Characterization tool
 Version: 0.1
 Authors@R: 
     person("Jason", "Li", , "lijxug@gmail.com", role = c("aut", "cre"),
