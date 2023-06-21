@@ -5,10 +5,13 @@ title: "Tutorial for DexTRAC"
 # Loading
 ```{r}
 require(tidyverse)
-require(checkmate)
 require(ggrepel)
+require(checkmate)
 require(ggtext)
+require(patchwork)
+require(reshape2)
 require(DexTRAC)
+require(pheatmap)
 data('demo_hbvhcc')
 data('color_atbds')
 ```
