@@ -11,4 +11,4 @@ Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.2.3
 LazyData: true
 Imports:
-  fitdistrplus
+  stats, fitdistrplus, pbmcapply, mixtools, parallel
