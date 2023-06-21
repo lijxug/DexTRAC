@@ -5,8 +5,8 @@
 
 <!-- badges: start -->
 
-usethis::use\_lifecycle\_badge(‘experimental’)
-
+[![Lifecycle:
+experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 <!-- badges: end -->
 
 The goal of DexTRAC is to calculate antigen-TCR specificities through
