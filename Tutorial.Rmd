@@ -8,36 +8,31 @@ require(tidyverse)
 require(checkmate)
 require(ggrepel)
 require(ggtext)
-require(JasonToolBox)
-require(fitdistrplus)
-data_dir = './data/'
-# run setwd('~/data/projects/09.Niehu_HBVHCC/') in the command line
-meta_tbl = read_csv(sprintf('%s/hbv_hcc_cohor2.rna_tcr_dex.csv', data_dir))
-colnames(meta_tbl)[1] = 'cellID'
-
-source('R/utils.R')
+require(DexTRAC)
+data('demo_hbvhcc')
+data('color_atbds')
 ```
 
 ```{r}
 var_clone_id = 'clone.id'
 var_patient_id = 'patient'
-atbd_names = str_extract(pattern = '^HBVgp.*', colnames(meta_tbl)) %>% .[!is.na(.)]
-gpexpr_mt = as.matrix(meta_tbl[, atbd_names])
-rownames(gpexpr_mt) = meta_tbl$cellID
+atbd_names = str_extract(pattern = '^HBVgp.*', colnames(demo_hbvhcc)) %>% .[!is.na(.)]
+gpexpr_mt = as.matrix(demo_hbvhcc[, atbd_names])
+rownames(gpexpr_mt) = demo_hbvhcc$barcode
 gpexpr_mt[is.na(gpexpr_mt)] = 0
-celltype_vec = with(meta_tbl, setNames(nm = cellID, major_cluster))
+celltype_vec = with(demo_hbvhcc, setNames(nm = barcode, major_cluster))
 major_celltype_vec = setNames(nm = names(celltype_vec), celltype_vec %>% str_extract(pattern = '^[^_]+'))
-checkmate::assert(all(meta_tbl$`CD4/CD8` == major_celltype_vec))
+checkmate::assert(all(demo_hbvhcc$`CD4/CD8` == major_celltype_vec))
 
-tmp_meta = unique(meta_tbl[, c(var_clone_id, var_patient_id)])
+tmp_meta = unique(demo_hbvhcc[, c(var_clone_id, var_patient_id)])
 clone2pat_vec = setNames(nm = tmp_meta[[var_clone_id]], tmp_meta[[var_patient_id]]) 
 
 
 
 
-cloneid_vec = with(meta_tbl, setNames(nm = cellID, meta_tbl$clone.id))
-clonesize_vec = meta_tbl %>% dplyr::select(clone.id, clone.size) %>% distinct() %>% deframe
-CD8clonesize_vec = meta_tbl %>% dplyr::filter(major_cluster == 'CD8') %>% pull(clone.id) %>% table
+cloneid_vec = with(demo_hbvhcc, setNames(nm = barcode, demo_hbvhcc$clone.id))
+clonesize_vec = demo_hbvhcc %>% dplyr::select(clone.id, clone.size) %>% distinct() %>% deframe
+CD8clonesize_vec = demo_hbvhcc %>% dplyr::filter(major_cluster == 'CD8') %>% pull(clone.id) %>% table
 
 ```
 
@@ -105,8 +100,7 @@ pheatmap::pheatmap(
 
 # Determine avidities
 ```{r}
-avid_obj = determine_avidities(pval_df, signif_clones)
-
+avid_obj = determine_avidities(pval_df, signif_clones, padj_cutoff)
 
 plot(avid_obj$GMMfit_obj)
 
@@ -119,8 +113,8 @@ abline(v = avid_obj$logOR_cutoff, lty = 3, lwd = 2)
 ## Visualization of ORs
 ```{r, fig.width=6, fig.height=4}
 avid_obj$avidity_df %>%
-  filter(CloneID %in% signif_clones) %>%
-  filter(Fisher.OR > 0) %>% 
+  dplyr::filter(CloneID %in% signif_clones) %>%
+  dplyr::filter(Fisher.OR > 0) %>% 
   # filter(Fisher.Padj < padj_cutoff) %>%
   ggplot(aes(x = log10(Fisher.OR + 0.1))) +
   geom_histogram(aes(y = ..count.., fill = avidity), bins = 30) +
@@ -137,6 +131,8 @@ avid_obj$avidity_df %>%
 ```{r, fig.height=10, fig.width=22}
 plt_lst = list()
 flt_cloneid_vec = cloneid_vec[major_celltype_vec == 'CD8']
+signif_clonotypes2run = names(clonesize_vec[rownames(flt_padj_mt)] %>% sort(decreasing = T))
+bind_count_mt = lapply(gpexpr_lst, function(x){x$count_vec}) %>% do.call(what = cbind)
 for(t_tcr_clone in signif_clonotypes2run) {
   atbd_count_vec = bind_count_mt[names(flt_cloneid_vec)[flt_cloneid_vec == t_tcr_clone],] %>%
     apply(1, function(x) {
@@ -310,8 +306,8 @@ ggplot(t_plt_tbl, aes(
 
 ## Printing for overal distribution
 ```{r, fig.width=7, fig.height=5}
-meta_out_tbl = meta_tbl %>% 
-  filter(major_cluster == 'CD8', clone.id %in% clonal_cloneids)
+meta_out_tbl = demo_hbvhcc %>% 
+  dplyr::filter(major_cluster == 'CD8', clone.id %in% clonal_cloneids)
 
 HBV_specifc_clones = rownames(flt_padj_mt)
 Mono_reactive_clones = 
@@ -339,10 +335,10 @@ meta_out_tbl %>% ggplot(aes(fill = HBV_specifc_Tcell, x = patient)) +
 
 # ggsave(filename = './plots/barplot_specific.pdf', width = 7, height = 5)
 
-P16_clonesize = meta_out_tbl %>% filter(patient == 'P16') %>% dplyr::select(clone.id, clone.size) %>% distinct() %>% deframe %>% sort(decreasing = T)
+P16_clonesize = meta_out_tbl %>% dplyr::filter(patient == 'P16') %>% dplyr::select(clone.id, clone.size) %>% distinct() %>% deframe %>% sort(decreasing = T)
 head(P16_clonesize, 10)
 
-P16_cloneids = meta_out_tbl %>% filter(patient == 'P16') %>% pull(clone.id) %>% unique()
+P16_cloneids = meta_out_tbl %>% dplyr::filter(patient == 'P16') %>% pull(clone.id) %>% unique()
 
 ```
 
@@ -378,7 +374,6 @@ plt_bindratio_tbl$tag = factor(plt_bindratio_tbl$tag, levels = c('HBVspecific', 
 plt_bindratio_tbl$NoneBind_Ratio[is.na(plt_bindratio_tbl$NoneBind_Ratio)] = 0
 
 
-require(ggsignif)
 plt_bindratio_tbl %>% 
   ggplot(aes(x = tag, y = 1-NoneBind_Ratio)) + 
   geom_boxplot(width = 0.6) +
@@ -394,9 +389,8 @@ plt_bindratio_tbl %>%
 
 n_clonesize_cutoff = 20
 chosen_clones = names(clonesize_vec)[clonesize_vec > n_clonesize_cutoff]
-require(ggsignif)
 plt_bindratio_tbl %>% 
-  filter(clone_id %in% chosen_clones) %>% 
+  dplyr::filter(clone_id %in% chosen_clones) %>% 
   ggplot(aes(x = tag, y = 1-NoneBind_Ratio)) + 
   geom_boxplot() +
   geom_signif(comparisons = list(

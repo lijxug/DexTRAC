@@ -4,7 +4,12 @@
 \alias{determine_avidities}
 \title{Distinguish high and low avidities from enriched antigens for each clone}
 \usage{
-determine_avidities(pval_df, target_clones, p_norm_cutoff = 0.005)
+determine_avidities(
+  pval_df,
+  target_clones,
+  p_norm_cutoff = 0.005,
+  padj_cutoff = 0.1
+)
 }
 \arguments{
 \item{pval_df}{pval_df calculated by \code{estimate_enrichment}}
@@ -12,6 +17,8 @@ determine_avidities(pval_df, target_clones, p_norm_cutoff = 0.005)
 \item{target_clones}{User-defined clones of interest. Setting to include all the clones with at least one significantly enriched antigen is recommended.}
 
 \item{p_norm_cutoff}{The controled false postive rate}
+
+\item{padj_cutoff}{Specify the cutoff for p.adjusted values}
 }
 \value{
 a list

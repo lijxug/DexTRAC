@@ -85,7 +85,7 @@ estimate_enrichment = function(atbd_lst,
                                n_cores = NULL) {
   n_cores = ifelse(is.null(n_cores), parallel::detectCores(), n_cores)
 
-  bind_mt = do.all(lapply(atbd_lst, function(x) {
+  bind_mt = do.call(lapply(atbd_lst, function(x) {
     x$attached_lgl
   }), what = cbind)
 
@@ -136,13 +136,13 @@ estimate_enrichment = function(atbd_lst,
     return(t_res_lst)
   })
   names(clone_atbd_lst) = clonal_cloneids
-  pval_df = bind_rows(pbmcapply::pbmclapply(clone_atbd_lst, mc.cores = 10, function(x) {
-    t_tbl = bind_rows(lapply(x, function(y) {
+  pval_df = do.call(pbmcapply::pbmclapply(clone_atbd_lst, mc.cores = 10, function(x) {
+    t_tbl = do.call(lapply(x, function(y) {
       rownames(y$data_df) = NULL
       return(y$data_df)
-    }))
+    }), what = rbind)
     return(t_tbl)
-  }))
+  }), what = rbind)
   pval_df$Fisher.Padj = p.adjust(pval_df$Fisher.Pval, method = adjust.method)
   pval_df$Hyper.Padj = p.adjust(pval_df$Hyper.Pval, method = adjust.method)
 
@@ -156,10 +156,11 @@ estimate_enrichment = function(atbd_lst,
 #' @param pval_df pval_df calculated by `estimate_enrichment`
 #' @param target_clones User-defined clones of interest. Setting to include all the clones with at least one significantly enriched antigen is recommended.
 #' @param p_norm_cutoff The controled false postive rate
+#' @param padj_cutoff Specify the cutoff for p.adjusted values
 #' @export
 #' @return a list
 #'
-determine_avidities = function(pval_df, target_clones, p_norm_cutoff = 0.005) {
+determine_avidities = function(pval_df, target_clones, p_norm_cutoff = 0.005, padj_cutoff = 0.1) {
   avidity_df = pval_df
   avidity_df$Fisher.OR[avidity_df$Fisher.OR == Inf] = max(avidity_df$Fisher.OR[avidity_df$Fisher.OR != Inf])
   x = log10(avidity_df[avidity_df$CloneID %in% target_clones & avidity_df$Fisher.OR > 1, 'Fisher.OR'])
