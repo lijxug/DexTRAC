@@ -24,4 +24,4 @@ devtools::install_github("lijxug/DexTRAC")
 
 ## Example
 
-Please check Tutorail.Rmd for examples
+Please check Tutorial.Rmd for examples
